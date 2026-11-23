@@ -1,47 +1,23 @@
 name: Guidewire AI Guardian - PR Review
 
 on:
+workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened]
-    # Optional: limit to selected target branches.
+    # Optional: limit this workflow to selected target branches.
     # branches: [main, develop]
-
-  # Allows Pipedream to start this workflow after receiving a Guidewire QG webhook.
-  workflow_dispatch:
-    inputs:
-      commit_sha:
-        description: 'Commit SHA reported by Guidewire QG'
-        required: false
-        type: string
-      qg_status:
-        description: 'Final status reported by Guidewire QG'
-        required: false
-        type: string
-      verification_id:
-        description: 'Guidewire QG verification identifier'
-        required: false
-        type: string
-      message:
-        description: 'Message returned by Guidewire QG'
-        required: false
-        type: string
-      pr_url:
-        description: 'Related GitHub pull request URL, if available'
-        required: false
-        type: string
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: ai-guardian-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ai-guardian-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   ai-guardian-review:
-    if: ${{ github.event_name == 'pull_request' }}
-    name: Build, submit Guidewire QG verification, and request AI review
+    name: Build, collect PR changes, and request AI review
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -49,7 +25,9 @@ jobs:
       - name: Checkout exact PR source commit
         uses: actions/checkout@v4
         with:
+          # Review the exact commit that triggered this run.
           ref: ${{ github.event.pull_request.head.sha }}
+          # Full history is needed for a reliable base...head diff.
           fetch-depth: 0
           persist-credentials: false
 
@@ -62,8 +40,8 @@ jobs:
           Write-Host "Checked-out commit:"
           git rev-parse HEAD
 
-      # Enable only after this repository is a Guidewire project and the
-      # Windows runner has all required Guidewire build dependencies.
+      # Configure this repository variable to 'true' only after confirming
+      # that build-app.bat can build successfully on a GitHub-hosted runner.
       - name: Run Guidewire build
         if: ${{ vars.RUN_GUIDEWIRE_BUILD == 'true' }}
         shell: pwsh
@@ -80,67 +58,29 @@ jobs:
         if: ${{ vars.RUN_GUIDEWIRE_BUILD != 'true' }}
         shell: pwsh
         run: |
-          Write-Host "Guidewire build is disabled."
-          Write-Host "The CICD Manager QG verification call will be skipped."
-          Write-Host "Set repository variable RUN_GUIDEWIRE_BUILD=true only after configuring the Guidewire build environment."
-
-      # This posts SUCCESSFUL only after the configured Guidewire build succeeds.
-      # The endpoint/status contract below is copied from the user's existing
-      # gw-quality-gate-demo.yaml. No FAILED status is assumed.
-      - name: Submit successful verification to Guidewire CICD Manager
-        if: ${{ success() && vars.RUN_GUIDEWIRE_BUILD == 'true' }}
-        shell: pwsh
-        env:
-          CICD_TOKEN: ${{ secrets.CICD_TOKEN }}
-          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:CICD_TOKEN)) {
-            throw "Missing GitHub secret CICD_TOKEN. Add it under Settings > Secrets and variables > Actions."
-          }
-
-          $headers = @{
-            "Authorization" = "Bearer $env:CICD_TOKEN"
-            "Content-Type"  = "application/json"
-          }
-
-          $body = @{
-            artifact = @{
-              type = "COMMIT"
-              id   = $env:COMMIT_ID
-            }
-            status  = "SUCCESSFUL"
-            url     = $env:PR_URL
-            comment = "Guidewire build passed for GitHub PR #$env:PR_NUMBER"
-          } | ConvertTo-Json -Depth 3
-
-          $endpoint = "https://cicd-manager-service.api.omega2-andromeda.guidewire.net/api/v3/tenants/valuemom/starsystems/gwcp/applications/cm/quality-gates/usaaqualitygatedemo/verifications"
-
-          $response = Invoke-RestMethod `
-            -Uri $endpoint `
-            -Method POST `
-            -Headers $headers `
-            -Body $body `
-            -ErrorAction Stop
-
-          Write-Host "Guidewire CICD Manager verification API call succeeded."
-          $response | ConvertTo-Json -Depth 5 | Write-Host
+          Write-Host "Guidewire build was not run."
+          Write-Host "After configuring the runner and build dependencies, set repository variable RUN_GUIDEWIRE_BUILD=true."
 
       - name: Create PR diff for AI review
+        id: create_diff
         shell: pwsh
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git diff --no-ext-diff --unified=3 "$env:BASE_SHA...$env:HEAD_SHA" -- . |
-            Out-File -FilePath "$env:GITHUB_WORKSPACE\pr-diff.txt" -Encoding utf8
+          git diff --no-ext-diff --unified=3 "$env:BASE_SHA...$env:HEAD_SHA" -- . `
+            | Out-File -FilePath "$env:GITHUB_WORKSPACE\pr-diff.txt" -Encoding utf8
 
           if (-not (Test-Path "$env:GITHUB_WORKSPACE\pr-diff.txt")) {
             throw "Could not create the PR diff."
           }
 
           $diff = Get-Content "$env:GITHUB_WORKSPACE\pr-diff.txt" -Raw
+          if ([string]::IsNullOrWhiteSpace($diff)) {
+            Write-Host "No textual changes found in the PR diff."
+          }
+
+          # Keep the webhook payload within a conservative size limit.
           if ($diff.Length -gt 100000) {
             $diff = $diff.Substring(0, 100000) + "`n[Diff truncated at 100,000 characters]"
           }
@@ -148,7 +88,6 @@ jobs:
           $diff | Out-File -FilePath "$env:GITHUB_WORKSPACE\pr-diff-for-agent.txt" -Encoding utf8
 
       - name: Send PR details and diff to AI Guardian
-        if: ${{ vars.ENABLE_AI_GUARDIAN_WEBHOOK == 'true' }}
         shell: pwsh
         env:
           AI_GUARDIAN_WEBHOOK_URL: ${{ secrets.AI_GUARDIAN_WEBHOOK_URL }}
@@ -163,15 +102,15 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:AI_GUARDIAN_WEBHOOK_URL)) {
-            throw "ENABLE_AI_GUARDIAN_WEBHOOK is true, but AI_GUARDIAN_WEBHOOK_URL is missing."
+            throw "Missing GitHub secret AI_GUARDIAN_WEBHOOK_URL. Add your AI Guardian webhook URL in repository secrets."
           }
 
           $diff = Get-Content "$env:GITHUB_WORKSPACE\pr-diff-for-agent.txt" -Raw
 
           $payload = @{
-            event        = "pull_request"
-            repository   = $env:REPOSITORY
-            pull_request = @{
+            event         = "pull_request"
+            repository    = $env:REPOSITORY
+            pull_request  = @{
               number        = [int]$env:PR_NUMBER
               title         = $env:PR_TITLE
               url           = $env:PR_URL
@@ -180,8 +119,8 @@ jobs:
               base_sha      = $env:BASE_SHA
               head_sha      = $env:HEAD_SHA
             }
-            diff         = $diff
-            requested_at = (Get-Date).ToUniversalTime().ToString("o")
+            diff          = $diff
+            requested_at  = (Get-Date).ToUniversalTime().ToString("o")
           } | ConvertTo-Json -Depth 8
 
           $headers = @{ "Content-Type" = "application/json" }
@@ -189,6 +128,7 @@ jobs:
             $headers["Authorization"] = "Bearer $env:AI_GUARDIAN_TOKEN"
           }
 
+          # The receiving AI Guardian endpoint must accept the JSON contract above.
           $response = Invoke-RestMethod `
             -Uri $env:AI_GUARDIAN_WEBHOOK_URL `
             -Method Post `
@@ -200,12 +140,6 @@ jobs:
           Write-Host "AI Guardian webhook accepted the request."
           $response | ConvertTo-Json -Depth 8 | Write-Host
 
-      - name: Explain skipped AI Guardian webhook
-        if: ${{ vars.ENABLE_AI_GUARDIAN_WEBHOOK != 'true' }}
-        shell: pwsh
-        run: |
-          Write-Host "AI Guardian webhook is disabled. Set ENABLE_AI_GUARDIAN_WEBHOOK=true after configuring its endpoint and token."
-
       - name: Upload PR diff for troubleshooting
         if: always()
         uses: actions/upload-artifact@v4
@@ -214,30 +148,3 @@ jobs:
           path: pr-diff.txt
           if-no-files-found: ignore
           retention-days: 7
-
-  # This job is started by Pipedream through the workflow_dispatch API.
-  # It handles the asynchronous result callback from Guidewire QG separately
-  # from the original pull-request review job.
-  qg-webhook-result:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    name: Process Guidewire QG webhook result
-    runs-on: ubuntu-latest
-    steps:
-      - name: Display Guidewire QG result
-        env:
-          COMMIT_SHA: ${{ inputs.commit_sha }}
-          QG_STATUS: ${{ inputs.qg_status }}
-          VERIFICATION_ID: ${{ inputs.verification_id }}
-          QG_MESSAGE: ${{ inputs.message }}
-          PR_URL: ${{ inputs.pr_url }}
-        run: |
-          echo "Guidewire QG callback received through Pipedream"
-          echo "Commit SHA: $COMMIT_SHA"
-          echo "QG status: $QG_STATUS"
-          echo "Verification ID: $VERIFICATION_ID"
-          echo "PR URL: $PR_URL"
-          echo "Message: $QG_MESSAGE"
-
-          if [ -z "$QG_STATUS" ]; then
-            echo "Warning: QG status was not provided by the webhook."
-          fi
