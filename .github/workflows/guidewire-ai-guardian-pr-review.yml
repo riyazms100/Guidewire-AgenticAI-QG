@@ -147,7 +147,7 @@ jobs:
             --output response.json \
             --write-out "%{http_code}" \
             --request POST \
-            "https://cicd-manager-service.api.omega2-andromeda.guidewire.net/api/v3/tenants/valuemom/starsystems/gwcp/applications/cm/quality-gates/usaaqualitygatedemo/verifications" \
+            "https://cicd-manager-service.api.omega2-andromeda.guidewire.net/api/v3/tenants/valuemom/starsystems/gwcp/applications/pc/quality-gates/qg_-_ai-fw/verifications" \
             --header "Authorization: Bearer $CICD_TOKEN" \
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
