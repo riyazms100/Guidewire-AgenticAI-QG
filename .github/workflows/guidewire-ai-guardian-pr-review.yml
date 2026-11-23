@@ -1,6 +1,7 @@
 name: Guidewire AI Guardian - PR Review
 
 on:
+workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened]
     # Optional: limit this workflow to selected target branches.
