@@ -1,1 +1,150 @@
+name: Guidewire AI Guardian - PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # Optional: limit this workflow to selected target branches.
+    # branches: [main, develop]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ai-guardian-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-guardian-review:
+    name: Build, collect PR changes, and request AI review
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout exact PR source commit
+        uses: actions/checkout@v4
+        with:
+          # Review the exact commit that triggered this run.
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Full history is needed for a reliable base...head diff.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Show PR checkout details
+        shell: pwsh
+        run: |
+          Write-Host "PR number: ${{ github.event.pull_request.number }}"
+          Write-Host "Source branch: ${{ github.head_ref }}"
+          Write-Host "Target branch: ${{ github.base_ref }}"
+          Write-Host "Checked-out commit:"
+          git rev-parse HEAD
+
+      # Configure this repository variable to 'true' only after confirming
+      # that build-app.bat can build successfully on a GitHub-hosted runner.
+      - name: Run Guidewire build
+        if: ${{ vars.RUN_GUIDEWIRE_BUILD == 'true' }}
+        shell: pwsh
+        run: |
+          if (-not (Test-Path ".\build-app.bat")) {
+            throw "RUN_GUIDEWIRE_BUILD is true, but build-app.bat was not found at the repository root."
+          }
+          cmd /c build-app.bat
+          if ($LASTEXITCODE -ne 0) {
+            throw "Guidewire build failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Explain skipped Guidewire build
+        if: ${{ vars.RUN_GUIDEWIRE_BUILD != 'true' }}
+        shell: pwsh
+        run: |
+          Write-Host "Guidewire build was not run."
+          Write-Host "After configuring the runner and build dependencies, set repository variable RUN_GUIDEWIRE_BUILD=true."
+
+      - name: Create PR diff for AI review
+        id: create_diff
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --no-ext-diff --unified=3 "$env:BASE_SHA...$env:HEAD_SHA" -- . `
+            | Out-File -FilePath "$env:GITHUB_WORKSPACE\pr-diff.txt" -Encoding utf8
+
+          if (-not (Test-Path "$env:GITHUB_WORKSPACE\pr-diff.txt")) {
+            throw "Could not create the PR diff."
+          }
+
+          $diff = Get-Content "$env:GITHUB_WORKSPACE\pr-diff.txt" -Raw
+          if ([string]::IsNullOrWhiteSpace($diff)) {
+            Write-Host "No textual changes found in the PR diff."
+          }
+
+          # Keep the webhook payload within a conservative size limit.
+          if ($diff.Length -gt 100000) {
+            $diff = $diff.Substring(0, 100000) + "`n[Diff truncated at 100,000 characters]"
+          }
+
+          $diff | Out-File -FilePath "$env:GITHUB_WORKSPACE\pr-diff-for-agent.txt" -Encoding utf8
+
+      - name: Send PR details and diff to AI Guardian
+        shell: pwsh
+        env:
+          AI_GUARDIAN_WEBHOOK_URL: ${{ secrets.AI_GUARDIAN_WEBHOOK_URL }}
+          AI_GUARDIAN_TOKEN: ${{ secrets.AI_GUARDIAN_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          SOURCE_BRANCH: ${{ github.head_ref }}
+          TARGET_BRANCH: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AI_GUARDIAN_WEBHOOK_URL)) {
+            throw "Missing GitHub secret AI_GUARDIAN_WEBHOOK_URL. Add your AI Guardian webhook URL in repository secrets."
+          }
+
+          $diff = Get-Content "$env:GITHUB_WORKSPACE\pr-diff-for-agent.txt" -Raw
+
+          $payload = @{
+            event         = "pull_request"
+            repository    = $env:REPOSITORY
+            pull_request  = @{
+              number        = [int]$env:PR_NUMBER
+              title         = $env:PR_TITLE
+              url           = $env:PR_URL
+              source_branch = $env:SOURCE_BRANCH
+              target_branch = $env:TARGET_BRANCH
+              base_sha      = $env:BASE_SHA
+              head_sha      = $env:HEAD_SHA
+            }
+            diff          = $diff
+            requested_at  = (Get-Date).ToUniversalTime().ToString("o")
+          } | ConvertTo-Json -Depth 8
+
+          $headers = @{ "Content-Type" = "application/json" }
+          if (-not [string]::IsNullOrWhiteSpace($env:AI_GUARDIAN_TOKEN)) {
+            $headers["Authorization"] = "Bearer $env:AI_GUARDIAN_TOKEN"
+          }
+
+          # The receiving AI Guardian endpoint must accept the JSON contract above.
+          $response = Invoke-RestMethod `
+            -Uri $env:AI_GUARDIAN_WEBHOOK_URL `
+            -Method Post `
+            -Headers $headers `
+            -Body $payload `
+            -TimeoutSec 120 `
+            -ErrorAction Stop
+
+          Write-Host "AI Guardian webhook accepted the request."
+          $response | ConvertTo-Json -Depth 8 | Write-Host
+
+      - name: Upload PR diff for troubleshooting
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-diff-${{ github.event.pull_request.number }}
+          path: pr-diff.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
