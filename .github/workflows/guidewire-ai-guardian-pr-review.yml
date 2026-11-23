@@ -1,39 +1,26 @@
-
-name: Guidewire AI Guardian - PR Review
+name: Guidewire AI Guardian - QG Test
 
 'on':
-  # Test workflow whenever changes are pushed to main
-  push:
-    branches:
-      - main
-
-  # Automatically run when a PR is created or updated
   pull_request:
     types: [opened, synchronize, reopened]
-
-  # Allow Pipedream to trigger this workflow
   workflow_dispatch:
     inputs:
       commit_sha:
         description: 'Commit SHA reported by Guidewire QG'
         required: false
         type: string
-
       qg_status:
         description: 'Final status reported by Guidewire QG'
         required: false
         type: string
-
       verification_id:
-        description: 'Guidewire QG verification ID'
+        description: 'Guidewire QG verification identifier'
         required: false
         type: string
-
       message:
         description: 'Message returned by Guidewire QG'
         required: false
         type: string
-
       pr_url:
         description: 'Related GitHub pull request URL'
         required: false
@@ -44,205 +31,135 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ai-guardian-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.inputs.commit_sha || github.run_id }}
+  group: guidewire-qg-${{ github.event.pull_request.number || github.event.inputs.commit_sha || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-
-  # --------------------------------------------------
-  # JOB 1: Validate push trigger
-  # --------------------------------------------------
-  workflow-validation:
-    name: Validate workflow push trigger
-    if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Confirm workflow execution
-        run: |
-          echo "Guidewire AI Guardian workflow triggered successfully."
-          echo "Branch: ${{ github.ref_name }}"
-          echo "Commit: ${{ github.sha }}"
-
-  # --------------------------------------------------
-  # JOB 2: AI Guardian PR Review
-  # --------------------------------------------------
-  ai-guardian-review:
-    name: Build, collect PR changes, and request AI review
+  # TEST PHASE: PR-triggered run performs a deliberately simple dummy validation.
+  # Only after it succeeds does the next step submit SUCCESSFUL to the demo QG.
+  qg-dummy-validation-and-submit:
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: windows-latest
-    timeout-minutes: 30
+    name: Dummy validation and submit result to Guidewire QG
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout exact PR source commit
+      - name: Checkout exact PR commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Show PR checkout details
-        shell: pwsh
+      # STEP 1: This is intentionally a dummy validation for integration testing.
+      # Replace it with real Guidewire validation before using this beyond the demo.
+      - name: Step 1 - Run dummy validation
+        id: dummy_validation
+        shell: bash
         run: |
-          Write-Host "PR number: ${{ github.event.pull_request.number }}"
-          Write-Host "Source branch: ${{ github.head_ref }}"
-          Write-Host "Target branch: ${{ github.base_ref }}"
-          Write-Host "Checked-out commit:"
-          git rev-parse HEAD
+          set -euo pipefail
+          echo "Starting dummy validation for Guidewire QG integration test..."
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "PR number: ${{ github.event.pull_request.number }}"
+          echo "PR commit: ${{ github.event.pull_request.head.sha }}"
 
-      - name: Run Guidewire build
-        if: ${{ vars.RUN_GUIDEWIRE_BUILD == 'true' }}
-        shell: pwsh
-        run: |
-          if (-not (Test-Path ".\build-app.bat")) {
-            throw "build-app.bat was not found at the repository root."
-          }
+          # Placeholder check: verify the checkout exists and Git can read the commit.
+          test -d .git
+          git rev-parse --verify HEAD
 
-          cmd /c build-app.bat
+          echo "Dummy validation PASSED."
+          echo "This is a test result, not a real Guidewire build or code-quality assessment."
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Guidewire build failed with exit code $LASTEXITCODE."
-          }
-
-      - name: Explain skipped Guidewire build
-        if: ${{ vars.RUN_GUIDEWIRE_BUILD != 'true' }}
-        shell: pwsh
-        run: |
-          Write-Host "Guidewire build was not run."
-          Write-Host "Set RUN_GUIDEWIRE_BUILD=true after configuring the runner and dependencies."
-
-      - name: Create PR diff for AI review
-        shell: pwsh
+      # STEP 2: Submit SUCCESSFUL to the existing demo QG only after Step 1 passes.
+      - name: Step 2 - Submit SUCCESSFUL verification to Guidewire QG
+        if: ${{ success() && steps.dummy_validation.outcome == 'success' }}
+        shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          git diff --no-ext-diff --unified=3 "$env:BASE_SHA...$env:HEAD_SHA" -- . |
-            Out-File -FilePath "$env:GITHUB_WORKSPACE\pr-diff.txt" -Encoding utf8
-
-          if (-not (Test-Path "$env:GITHUB_WORKSPACE\pr-diff.txt")) {
-            throw "Could not create the PR diff."
-          }
-
-          $diff = Get-Content "$env:GITHUB_WORKSPACE\pr-diff.txt" -Raw
-
-          if ([string]::IsNullOrWhiteSpace($diff)) {
-            Write-Host "No textual changes found in the PR diff."
-          }
-
-          if ($diff.Length -gt 100000) {
-            $diff = $diff.Substring(0, 100000) +
-              "`n[Diff truncated at 100,000 characters]"
-          }
-
-          $diff | Out-File `
-            -FilePath "$env:GITHUB_WORKSPACE\pr-diff-for-agent.txt" `
-            -Encoding utf8
-
-      - name: Send PR details and diff to AI Guardian
-        shell: pwsh
-        env:
-          AI_GUARDIAN_WEBHOOK_URL: ${{ secrets.AI_GUARDIAN_WEBHOOK_URL }}
-          AI_GUARDIAN_TOKEN: ${{ secrets.AI_GUARDIAN_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          CICD_TOKEN: ${{ secrets.CICD_TOKEN }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-          SOURCE_BRANCH: ${{ github.head_ref }}
-          TARGET_BRANCH: ${{ github.base_ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:AI_GUARDIAN_WEBHOOK_URL)) {
-            throw "Missing AI_GUARDIAN_WEBHOOK_URL repository secret."
-          }
+          set -euo pipefail
 
-          $diff = Get-Content `
-            "$env:GITHUB_WORKSPACE\pr-diff-for-agent.txt" -Raw
+          if [[ -z "${CICD_TOKEN:-}" ]]; then
+            echo "::error::Missing CICD_TOKEN secret. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
 
-          $payload = @{
-            event = "pull_request"
-            repository = $env:REPOSITORY
-            pull_request = @{
-              number = [int]$env:PR_NUMBER
-              title = $env:PR_TITLE
-              url = $env:PR_URL
-              source_branch = $env:SOURCE_BRANCH
-              target_branch = $env:TARGET_BRANCH
-              base_sha = $env:BASE_SHA
-              head_sha = $env:HEAD_SHA
-            }
-            diff = $diff
-            requested_at = (Get-Date).ToUniversalTime().ToString("o")
-          } | ConvertTo-Json -Depth 8
+          ENDPOINT="https://cicd-manager-service.api.omega2-andromeda.guidewire.net/api/v3/tenants/valuemom/starsystems/gwcp/applications/cm/quality-gates/usaaqualitygatedemo/verifications"
 
-          $headers = @{
-            "Content-Type" = "application/json"
-          }
+          BODY="$(jq -n \
+            --arg commit "$COMMIT_ID" \
+            --arg pr_url "$PR_URL" \
+            --arg comment "TEST ONLY: dummy GitHub Actions validation passed for PR #$PR_NUMBER" \
+            '{
+              artifact: {
+                type: "COMMIT",
+                id: $commit
+              },
+              status: "SUCCESSFUL",
+              url: $pr_url,
+              comment: $comment
+            }')"
 
-          if (-not [string]::IsNullOrWhiteSpace($env:AI_GUARDIAN_TOKEN)) {
-            $headers["Authorization"] = "Bearer $env:AI_GUARDIAN_TOKEN"
-          }
+          echo "Submitting test verification to Guidewire CICD Manager..."
+          echo "Commit: $COMMIT_ID"
+          echo "PR: $PR_URL"
+          echo "Status being submitted: SUCCESSFUL (dummy validation test)"
 
-          $response = Invoke-RestMethod `
-            -Uri $env:AI_GUARDIAN_WEBHOOK_URL `
-            -Method Post `
-            -Headers $headers `
-            -Body $payload `
-            -TimeoutSec 120 `
-            -ErrorAction Stop
+          HTTP_CODE="$(curl --silent --show-error \
+            --output qg-response.json \
+            --write-out "%{http_code}" \
+            --request POST \
+            --url "$ENDPOINT" \
+            --header "Authorization: Bearer $CICD_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "$BODY")"
 
-          Write-Host "AI Guardian webhook accepted the request."
-          $response | ConvertTo-Json -Depth 8 | Write-Host
+          echo "Guidewire QG HTTP response: $HTTP_CODE"
+          if [[ -s qg-response.json ]]; then
+            cat qg-response.json
+          fi
 
-      - name: Upload PR diff for troubleshooting
+          if [[ ! "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+            echo "::error::Guidewire QG verification request failed with HTTP $HTTP_CODE."
+            exit 1
+          fi
+
+          echo "Guidewire QG accepted the SUCCESSFUL test verification."
+
+      - name: Upload QG API response
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr-diff-${{ github.event.pull_request.number }}
-          path: pr-diff.txt
+          name: guidewire-qg-test-response-${{ github.event.pull_request.number }}
+          path: qg-response.json
           if-no-files-found: ignore
           retention-days: 7
 
-  # --------------------------------------------------
-  # JOB 3: Process Guidewire QG webhook callback
-  # --------------------------------------------------
+  # Pipedream starts this workflow through workflow_dispatch when it receives
+  # a Guidewire QG webhook callback. This job only displays the callback data.
   qg-webhook-result:
-    name: Process Guidewire QG webhook result
     if: ${{ github.event_name == 'workflow_dispatch' }}
+    name: Process Guidewire QG webhook result
     runs-on: ubuntu-latest
-
     steps:
-      - name: Display Guidewire QG response
+      - name: Display Guidewire QG result
         env:
           COMMIT_SHA: ${{ inputs.commit_sha }}
           QG_STATUS: ${{ inputs.qg_status }}
           VERIFICATION_ID: ${{ inputs.verification_id }}
-          MESSAGE: ${{ inputs.message }}
+          QG_MESSAGE: ${{ inputs.message }}
           PR_URL: ${{ inputs.pr_url }}
         run: |
-          echo "======================================"
-          echo "GUIDEWIRE QUALITY GATE RESPONSE"
-          echo "======================================"
+          echo "Guidewire QG callback received through Pipedream"
           echo "Commit SHA: $COMMIT_SHA"
-          echo "QG Status: $QG_STATUS"
+          echo "QG status: $QG_STATUS"
           echo "Verification ID: $VERIFICATION_ID"
           echo "PR URL: $PR_URL"
-          echo "Message: $MESSAGE"
-          echo "======================================"
+          echo "Message: $QG_MESSAGE"
 
-      - name: Validate callback payload
-        env:
-          COMMIT_SHA: ${{ inputs.commit_sha }}
-          QG_STATUS: ${{ inputs.qg_status }}
-        run: |
-          if [ -z "$COMMIT_SHA" ]; then
-            echo "Warning: No commit SHA was supplied."
+          if [[ -z "$QG_STATUS" ]]; then
+            echo "::warning::QG status was not provided by the webhook."
           fi
-
-          if [ -z "$QG_STATUS" ]; then
-            echo "Warning: No QG status was supplied."
-          fi
-
-          echo "QG callback received and processed."
-
