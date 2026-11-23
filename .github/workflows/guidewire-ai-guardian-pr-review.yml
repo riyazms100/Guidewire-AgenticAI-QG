@@ -87,7 +87,7 @@ jobs:
             exit 1
           fi
 
-          ENDPOINT="https://cicd-manager-service.api.omega2-andromeda.guidewire.net/api/v3/tenants/valuemom/starsystems/gwcp/applications/cm/quality-gates/usaaqualitygatedemo/verifications"
+          ENDPOINT="https://cicd-manager-service.api.omega2-andromeda.guidewire.net/api/v3/tenants/valuemom/starsystems/gwcp/applications/pc/quality-gates/qg_-_ai-fw/verifications"
 
           BODY="$(jq -n \
             --arg commit "$COMMIT_ID" \
