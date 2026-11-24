@@ -302,26 +302,37 @@ jobs:
       # --------------------------------------------------
 
      
-      - name: Configure Bitbucket Authentication
+        - name: Configure Bitbucket Authentication
         shell: bash
         env:
+          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
           BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [ -z "$BB_USER" ]; then
+            echo "ERROR: BITBUCKET_USERNAME secret is missing."
+            exit 1
+          fi
 
           if [ -z "$BB_TOKEN" ]; then
             echo "ERROR: BITBUCKET_TOKEN secret is missing."
             exit 1
           fi
 
-          echo "Configuring Bitbucket Bearer authentication..."
+          echo "Configuring Bitbucket personal token authentication..."
 
-          echo "GIT_CONFIG_COUNT=1" >> "$GITHUB_ENV"
-          echo "GIT_CONFIG_KEY_0=http.extraHeader" >> "$GITHUB_ENV"
-          echo "GIT_CONFIG_VALUE_0=Authorization: Bearer $BB_TOKEN" >> "$GITHUB_ENV"
+          AUTH_B64="$(printf '%s' "$BB_USER:$BB_TOKEN" | base64 | tr -d '\n')"
 
-          echo "Bitbucket Bearer authentication configured."
+          {
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=http.extraHeader"
+            printf 'GIT_CONFIG_VALUE_0=Authorization: Basic %s\n' "$AUTH_B64"
+          } >> "$GITHUB_ENV"
 
+          unset AUTH_B64
+
+          echo "Bitbucket authentication configured."
 
       # --------------------------------------------------
       # STEP 3: Prepare Bitbucket repository URL
