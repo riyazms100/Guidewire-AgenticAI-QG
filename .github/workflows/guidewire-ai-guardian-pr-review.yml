@@ -34,6 +34,41 @@ name: Guidewire AI Guardian - QG Test
         required: false
         type: string
 
+      project_key:
+        description: 'Bitbucket project key'
+        required: false
+        type: string
+
+      repo_slug:
+        description: 'Bitbucket repository slug'
+        required: false
+        type: string
+
+      pr_number:
+        description: 'Bitbucket PR number'
+        required: false
+        type: string
+
+      base_branch:
+        description: 'Bitbucket target branch'
+        required: false
+        type: string
+
+      head_branch:
+        description: 'Bitbucket source branch'
+        required: false
+        type: string
+
+      base_sha:
+        description: 'Bitbucket target commit SHA'
+        required: false
+        type: string
+
+      head_sha:
+        description: 'Bitbucket source commit SHA'
+        required: false
+        type: string
+
 permissions:
   contents: read
   pull-requests: read
@@ -43,6 +78,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
+  # ==================================================
+  # JOB 1: EXISTING GUIDEWIRE QUALITY GATE
+  # ==================================================
 
   qg-dummy-validation-and-submit:
 
@@ -123,7 +162,6 @@ jobs:
             exit 1
           fi
 
-          # Build the request body safely using jq
           REQUEST_BODY=$(jq -n \
             --arg commit "$COMMIT_SHA" \
             --arg status "$QG_STATUS" \
@@ -142,7 +180,6 @@ jobs:
           echo "Submitting verification for commit: $COMMIT_SHA"
           echo "Verification status: $QG_STATUS"
 
-          # Submit verification to Guidewire CICD Manager
           HTTP_CODE=$(curl --silent --show-error \
             --output response.json \
             --write-out "%{http_code}" \
@@ -158,13 +195,11 @@ jobs:
           echo "Guidewire API response:"
           cat response.json
 
-          # Check HTTP response
           if [[ ! "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
             echo "ERROR: Guidewire verification submission failed."
             exit 1
           fi
 
-          # Confirm returned verification status
           if ! jq -e '.status == "SUCCESSFUL"' response.json > /dev/null; then
             echo "ERROR: Guidewire did not return SUCCESSFUL status."
             exit 1
@@ -184,3 +219,379 @@ jobs:
           path: response.json
           if-no-files-found: ignore
           retention-days: 7
+
+
+  # ==================================================
+  # JOB 2: BITBUCKET PR EXTRACTION
+  # Runs only when called through Pipedream
+  # ==================================================
+
+  bitbucket-pr-extraction:
+
+    name: Bitbucket PR Extraction
+
+    runs-on: ubuntu-latest
+
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.project_key != '' &&
+      inputs.repo_slug != '' &&
+      inputs.pr_number != '' &&
+      inputs.base_branch != '' &&
+      inputs.head_branch != '' &&
+      inputs.base_sha != '' &&
+      inputs.head_sha != ''
+
+    env:
+      PROJECT_KEY: ${{ inputs.project_key }}
+      REPO_SLUG: ${{ inputs.repo_slug }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      PR_URL: ${{ inputs.pr_url }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+      HEAD_BRANCH: ${{ inputs.head_branch }}
+      BASE_SHA: ${{ inputs.base_sha }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+
+    steps:
+
+      # --------------------------------------------------
+      # STEP 1: Validate received PR information
+      # --------------------------------------------------
+
+      - name: Step 1 - Validate Bitbucket PR Details
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Validating Bitbucket PR information..."
+
+          for VALUE in PROJECT_KEY REPO_SLUG PR_NUMBER BASE_BRANCH HEAD_BRANCH BASE_SHA HEAD_SHA PR_URL; do
+            if [ -z "${!VALUE}" ]; then
+              echo "ERROR: Missing value: $VALUE"
+              exit 1
+            fi
+          done
+
+          if [[ ! "$BASE_SHA" =~ ^[a-fA-F0-9]{40}$ ]]; then
+            echo "ERROR: Invalid base SHA"
+            exit 1
+          fi
+
+          if [[ ! "$HEAD_SHA" =~ ^[a-fA-F0-9]{40}$ ]]; then
+            echo "ERROR: Invalid head SHA"
+            exit 1
+          fi
+
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Invalid PR number"
+            exit 1
+          fi
+
+          echo "Project: $PROJECT_KEY"
+          echo "Repository: $REPO_SLUG"
+          echo "PR Number: $PR_NUMBER"
+          echo "Base Branch: $BASE_BRANCH"
+          echo "Head Branch: $HEAD_BRANCH"
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+
+          echo "PR information validation successful."
+
+      # --------------------------------------------------
+      # STEP 2: Configure Bitbucket authentication
+      # --------------------------------------------------
+
+      - name: Step 2 - Configure Bitbucket Authentication
+        shell: bash
+        env:
+          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
+          BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BB_USER" ] || [ -z "$BB_TOKEN" ]; then
+            echo "ERROR: Bitbucket credentials are missing."
+            exit 1
+          fi
+
+          cat > "$RUNNER_TEMP/bb-askpass.sh" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            *sername*) printf '%s\n' "$BB_USER" ;;
+            *assword*) printf '%s\n' "$BB_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+
+          chmod 700 "$RUNNER_TEMP/bb-askpass.sh"
+
+          echo "GIT_ASKPASS=$RUNNER_TEMP/bb-askpass.sh" >> "$GITHUB_ENV"
+          echo "GIT_TERMINAL_PROMPT=0" >> "$GITHUB_ENV"
+
+          echo "Bitbucket authentication configured."
+
+      # --------------------------------------------------
+      # STEP 3: Construct Bitbucket clone URL
+      # Hostname is extracted from the supplied PR URL
+      # --------------------------------------------------
+
+      - name: Step 3 - Prepare Bitbucket Repository URL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          pr_url = os.environ["PR_URL"]
+          parsed = urlparse(pr_url)
+
+          if parsed.scheme != "https" or not parsed.hostname:
+              raise SystemExit("ERROR: PR URL must be a valid HTTPS URL")
+
+          project = os.environ["PROJECT_KEY"]
+          repo = os.environ["REPO_SLUG"]
+
+          import re
+
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+", project):
+              raise SystemExit("ERROR: Invalid project key")
+
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+              raise SystemExit("ERROR: Invalid repository slug")
+
+          clone_url = (
+              f"https://{parsed.hostname}/scm/"
+              f"{project}/{repo}.git"
+          )
+
+          with open(os.environ["GITHUB_ENV"], "a") as env_file:
+              env_file.write(f"BITBUCKET_CLONE_URL={clone_url}\n")
+
+          print("Bitbucket clone URL prepared.")
+          print(f"Repository host: {parsed.hostname}")
+          PY
+
+      # --------------------------------------------------
+      # STEP 4: Clone Bitbucket repository
+      # --------------------------------------------------
+
+      - name: Step 4 - Clone Bitbucket Repository
+        shell: bash
+        env:
+          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
+          BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p bitbucket-repo
+
+          cd bitbucket-repo
+
+          git init
+
+          git remote add origin "$BITBUCKET_CLONE_URL"
+
+          echo "Fetching Bitbucket base and head branches..."
+
+          git fetch --no-tags --depth=50 origin \
+            "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/pr-base" \
+            "+refs/heads/${HEAD_BRANCH}:refs/remotes/origin/pr-head"
+
+          echo "Initial repository fetch completed."
+
+      # --------------------------------------------------
+      # STEP 5: Ensure full history is available
+      # --------------------------------------------------
+
+      - name: Step 5 - Fetch Complete Branch History
+        shell: bash
+        env:
+          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
+          BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cd bitbucket-repo
+
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            echo "Repository is shallow. Fetching complete branch history..."
+
+            git fetch --no-tags --unshallow origin \
+              "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/pr-base" \
+              "+refs/heads/${HEAD_BRANCH}:refs/remotes/origin/pr-head"
+          fi
+
+          echo "Checking requested commit objects..."
+
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+
+          echo "Both requested commits are available."
+
+      # --------------------------------------------------
+      # STEP 6: Generate PR difference and commit history
+      # --------------------------------------------------
+
+      - name: Step 6 - Generate PR Difference
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd bitbucket-repo
+
+          echo "Calculating merge base..."
+
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          if [ -z "$MERGE_BASE" ]; then
+            echo "ERROR: Could not calculate PR merge base."
+            exit 1
+          fi
+
+          echo "Merge base: $MERGE_BASE"
+
+          mkdir -p ../pr-data
+
+          echo "Generating PR patch..."
+
+          git diff --binary \
+            "$MERGE_BASE" "$HEAD_SHA" \
+            > ../pr-data/pr-diff.patch
+
+          echo "Generating changed-file list..."
+
+          git diff --name-status \
+            "$MERGE_BASE" "$HEAD_SHA" \
+            > ../pr-data/changed-files.txt
+
+          echo "Generating commit history..."
+
+          git log "$BASE_SHA..$HEAD_SHA" \
+            --format='%H %an %aI %s' \
+            > ../pr-data/commit-history.txt
+
+          echo "PR comparison completed."
+
+      # --------------------------------------------------
+      # STEP 7: Extract actual changed source files
+      # --------------------------------------------------
+
+      - name: Step 7 - Extract Changed Source Files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd bitbucket-repo
+
+          mkdir -p ../pr-data/changed-source
+
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          echo "Extracting added, modified and renamed files..."
+
+          git diff --name-only --diff-filter=ACMR -z \
+            "$MERGE_BASE" "$HEAD_SHA" |
+          while IFS= read -r -d '' FILE; do
+
+            DEST="../pr-data/changed-source/$FILE"
+
+            mkdir -p "$(dirname "$DEST")"
+
+            git show "${HEAD_SHA}:${FILE}" > "$DEST"
+
+            echo "Extracted: $FILE"
+
+          done
+
+          echo "Source extraction completed."
+
+      # --------------------------------------------------
+      # STEP 8: Generate PR metadata
+      # --------------------------------------------------
+
+      - name: Step 8 - Generate PR Metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -n \
+            --arg project "$PROJECT_KEY" \
+            --arg repo "$REPO_SLUG" \
+            --arg pr "$PR_NUMBER" \
+            --arg url "$PR_URL" \
+            --arg base_branch "$BASE_BRANCH" \
+            --arg head_branch "$HEAD_BRANCH" \
+            --arg base_sha "$BASE_SHA" \
+            --arg head_sha "$HEAD_SHA" \
+            '{
+              project_key: $project,
+              repository: $repo,
+              pull_request_number: $pr,
+              pull_request_url: $url,
+              base_branch: $base_branch,
+              head_branch: $head_branch,
+              base_sha: $base_sha,
+              head_sha: $head_sha
+            }' > pr-data/pr-metadata.json
+
+          echo "PR metadata generated."
+
+      # --------------------------------------------------
+      # STEP 9: Package PR data
+      # --------------------------------------------------
+
+      - name: Step 9 - Create PR Data ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          zip -qr bitbucket-pr-data.zip pr-data
+
+          echo "PR data package created."
+
+          ls -lh bitbucket-pr-data.zip
+
+      # --------------------------------------------------
+      # STEP 10: Upload PR data as GitHub artifact
+      # --------------------------------------------------
+
+      - name: Step 10 - Upload Bitbucket PR Data
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitbucket-pr-${{ inputs.pr_number }}
+          path: bitbucket-pr-data.zip
+          if-no-files-found: error
+          retention-days: 3
+
+      # --------------------------------------------------
+      # STEP 11: Display extraction summary
+      # --------------------------------------------------
+
+      - name: Step 11 - PR Extraction Summary
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "BITBUCKET PR EXTRACTION COMPLETED"
+          echo "======================================"
+
+          echo "Project: $PROJECT_KEY"
+          echo "Repository: $REPO_SLUG"
+          echo "PR Number: $PR_NUMBER"
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+
+          echo "--------------------------------------"
+
+          echo "Changed files:"
+          cat pr-data/changed-files.txt
+
+          echo "--------------------------------------"
+
+          echo "Generated files:"
+          find pr-data -type f
+
+          echo "--------------------------------------"
+          echo "Artifact: bitbucket-pr-${PR_NUMBER}"
+          echo "======================================"
