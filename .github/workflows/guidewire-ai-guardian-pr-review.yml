@@ -322,39 +322,9 @@ jobs:
 
           echo "Bitbucket Bearer authentication configured."
 
-      - name: Test Bitbucket Authentication
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Testing Bitbucket project token..."
-
-          git ls-remote "$BITBUCKET_CLONE_URL" HEAD
-
-          echo "Bitbucket authentication successful."
-
-      - name: Clone Bitbucket Repository
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Cloning Bitbucket repository..."
-
-          git init bitbucket-repo
-          cd bitbucket-repo
-
-          git remote add origin "$BITBUCKET_CLONE_URL"
-
-          git fetch --no-tags origin "$BASE_SHA"
-          git fetch --no-tags origin "$HEAD_SHA"
-
-          git checkout -b base FETCH_HEAD
-          git checkout -b head "$HEAD_SHA"
-
-          echo "Repository clone and fetch completed."
 
       # --------------------------------------------------
-      # STEP 3: Construct Bitbucket clone URL
+      # STEP 3: Prepare Bitbucket repository URL
       # Hostname is extracted from the supplied PR URL
       # --------------------------------------------------
 
@@ -397,10 +367,30 @@ jobs:
           PY
 
       # --------------------------------------------------
-      # STEP 4: Clone Bitbucket repository
+      # STEP 4: Test Bitbucket authentication
       # --------------------------------------------------
 
-      - name: Step 4 - Clone Bitbucket Repository
+      - name: Step 4 - Test Bitbucket Authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Testing Bitbucket project token..."
+
+          if [ -z "${BITBUCKET_CLONE_URL:-}" ]; then
+            echo "ERROR: Bitbucket clone URL is missing."
+            exit 1
+          fi
+
+          git ls-remote "$BITBUCKET_CLONE_URL" HEAD
+
+          echo "Bitbucket authentication successful."
+
+      # --------------------------------------------------
+      # STEP 5: Clone Bitbucket repository
+      # --------------------------------------------------
+
+      - name: Step 5 - Clone Bitbucket Repository
         shell: bash
         env:
           BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
@@ -425,10 +415,10 @@ jobs:
           echo "Initial repository fetch completed."
 
       # --------------------------------------------------
-      # STEP 5: Ensure full history is available
+      # STEP 6: Ensure full history is available
       # --------------------------------------------------
 
-      - name: Step 5 - Fetch Complete Branch History
+      - name: Step 6 - Fetch Complete Branch History
         shell: bash
         env:
           BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
@@ -454,10 +444,10 @@ jobs:
           echo "Both requested commits are available."
 
       # --------------------------------------------------
-      # STEP 6: Generate PR difference and commit history
+      # STEP 7: Generate PR difference and commit history
       # --------------------------------------------------
 
-      - name: Step 6 - Generate PR Difference
+      - name: Step 7 - Generate PR Difference
         shell: bash
         run: |
           set -euo pipefail
@@ -498,10 +488,10 @@ jobs:
           echo "PR comparison completed."
 
       # --------------------------------------------------
-      # STEP 7: Extract actual changed source files
+      # STEP 8: Extract actual changed source files
       # --------------------------------------------------
 
-      - name: Step 7 - Extract Changed Source Files
+      - name: Step 8 - Extract Changed Source Files
         shell: bash
         run: |
           set -euo pipefail
@@ -531,10 +521,10 @@ jobs:
           echo "Source extraction completed."
 
       # --------------------------------------------------
-      # STEP 8: Generate PR metadata
+      # STEP 9: Generate PR metadata
       # --------------------------------------------------
 
-      - name: Step 8 - Generate PR Metadata
+      - name: Step 9 - Generate PR Metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -562,10 +552,10 @@ jobs:
           echo "PR metadata generated."
 
       # --------------------------------------------------
-      # STEP 9: Package PR data
+      # STEP 10: Package PR data
       # --------------------------------------------------
 
-      - name: Step 9 - Create PR Data ZIP
+      - name: Step 10 - Create PR Data ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -577,10 +567,10 @@ jobs:
           ls -lh bitbucket-pr-data.zip
 
       # --------------------------------------------------
-      # STEP 10: Upload PR data as GitHub artifact
+      # STEP 11: Upload PR data as GitHub artifact
       # --------------------------------------------------
 
-      - name: Step 10 - Upload Bitbucket PR Data
+      - name: Step 11 - Upload Bitbucket PR Data
         uses: actions/upload-artifact@v4
         with:
           name: bitbucket-pr-${{ inputs.pr_number }}
@@ -589,10 +579,10 @@ jobs:
           retention-days: 3
 
       # --------------------------------------------------
-      # STEP 11: Display extraction summary
+      # STEP 12: Display extraction summary
       # --------------------------------------------------
 
-      - name: Step 11 - PR Extraction Summary
+      - name: Step 12 - PR Extraction Summary
         shell: bash
         run: |
           echo "======================================"
