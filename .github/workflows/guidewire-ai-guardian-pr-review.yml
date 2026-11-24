@@ -297,12 +297,11 @@ jobs:
 
           echo "PR information validation successful."
 
-      # --------------------------------------------------
-      # STEP 2: Configure Bitbucket authentication
+     # --------------------------------------------------
+      # STEP 2: Configure Bitbucket Authentication
       # --------------------------------------------------
 
-     
-        - name: Configure Bitbucket Authentication
+      - name: Configure Bitbucket Authentication
         shell: bash
         env:
           BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
