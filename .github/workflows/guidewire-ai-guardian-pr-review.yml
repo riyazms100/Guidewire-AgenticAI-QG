@@ -89,6 +89,11 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    # Run for PR events or workflow dispatches that contain a commit SHA.
+    if: >-
+      github.event_name == 'pull_request' ||
+      inputs.commit_sha != ''
+
     env:
       COMMIT_SHA: ${{ inputs.commit_sha || github.event.pull_request.head.sha }}
       QG_STATUS: ${{ inputs.qg_status || 'SUCCESSFUL' }}
@@ -297,79 +302,7 @@ jobs:
 
           echo "PR information validation successful."
 
-
-          
       # --------------------------------------------------
-      # STEP 2: Configure Bitbucket Authentication
-      # --------------------------------------------------
-      - name: Configure Bitbucket Authentication
-        shell: bash
-        env:
-          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
-          BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "$BB_USER" ]; then
-            echo "ERROR: BITBUCKET_USERNAME secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$BB_TOKEN" ]; then
-            echo "ERROR: BITBUCKET_TOKEN secret is missing."
-            exit 1
-          fi
-
-          echo "Configuring Bitbucket personal token authentication..."
-
-          AUTH_B64=$(printf '%s' "$BB_USER:$BB_TOKEN" | base64 | tr -d '\n')
-
-          {
-            echo "GIT_CONFIG_COUNT=1"
-            echo "GIT_CONFIG_KEY_0=http.extraHeader"
-            echo "GIT_CONFIG_VALUE_0=Authorization: Basic $AUTH_B64"
-          } >> "$GITHUB_ENV"
-
-          unset AUTH_B64
-
-          echo "Bitbucket authentication configured."
-
-
-      # --------------------------------------------------
-      # STEP 3: Test Bitbucket Authentication
-      # --------------------------------------------------
-      - name: Test Bitbucket Authentication
-        shell: bash
-        env:
-          BITBUCKET_REPO_URL: https://bitbucket.valuemom.zeta1-andromeda.guidewire.net/scm/GWCPDEV/policycenter.git
-        run: |
-          set -euo pipefail
-
-          echo "Testing Bitbucket repository access..."
-
-          git ls-remote "$BITBUCKET_REPO_URL" HEAD
-
-          echo "Bitbucket authentication successful."
-
-
-      # --------------------------------------------------
-      # STEP 4: Clone Bitbucket Repository
-      # --------------------------------------------------
-      - name: Clone Bitbucket Repository
-        shell: bash
-        env:
-          BITBUCKET_REPO_URL: https://bitbucket.valuemom.zeta1-andromeda.guidewire.net/scm/GWCPDEV/policycenter.git
-        run: |
-          set -euo pipefail
-
-          echo "Cloning Bitbucket repository..."
-
-          git clone "$BITBUCKET_REPO_URL" bitbucket-repo
-
-          echo "Repository cloned successfully."
-
-
-     # --------------------------------------------------
       # STEP 2: Configure Bitbucket Authentication
       # --------------------------------------------------
 
@@ -417,6 +350,7 @@ jobs:
 
           python3 - <<'PY'
           import os
+          import re
           from urllib.parse import urlparse
 
           pr_url = os.environ["PR_URL"]
@@ -427,8 +361,6 @@ jobs:
 
           project = os.environ["PROJECT_KEY"]
           repo = os.environ["REPO_SLUG"]
-
-          import re
 
           if not re.fullmatch(r"[A-Za-z0-9_.-]+", project):
               raise SystemExit("ERROR: Invalid project key")
@@ -457,7 +389,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Testing Bitbucket project token..."
+          echo "Testing Bitbucket authentication..."
 
           if [ -z "${BITBUCKET_CLONE_URL:-}" ]; then
             echo "ERROR: Bitbucket clone URL is missing."
@@ -474,9 +406,6 @@ jobs:
 
       - name: Step 5 - Clone Bitbucket Repository
         shell: bash
-        env:
-          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
-          BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -502,9 +431,6 @@ jobs:
 
       - name: Step 6 - Fetch Complete Branch History
         shell: bash
-        env:
-          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
-          BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -667,6 +593,8 @@ jobs:
       - name: Step 12 - PR Extraction Summary
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "======================================"
           echo "BITBUCKET PR EXTRACTION COMPLETED"
           echo "======================================"
