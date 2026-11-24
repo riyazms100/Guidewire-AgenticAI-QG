@@ -301,34 +301,57 @@ jobs:
       # STEP 2: Configure Bitbucket authentication
       # --------------------------------------------------
 
-      - name: Step 2 - Configure Bitbucket Authentication
+     
+      - name: Configure Bitbucket Authentication
         shell: bash
         env:
-          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
           BB_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
         run: |
           set -euo pipefail
 
-          if [ -z "$BB_USER" ] || [ -z "$BB_TOKEN" ]; then
-            echo "ERROR: Bitbucket credentials are missing."
+          if [ -z "$BB_TOKEN" ]; then
+            echo "ERROR: BITBUCKET_TOKEN secret is missing."
             exit 1
           fi
 
-          cat > "$RUNNER_TEMP/bb-askpass.sh" <<'EOF'
-          #!/bin/sh
-          case "$1" in
-            *sername*) printf '%s\n' "$BB_USER" ;;
-            *assword*) printf '%s\n' "$BB_TOKEN" ;;
-            *) exit 1 ;;
-          esac
-          EOF
+          echo "Configuring Bitbucket Bearer authentication..."
 
-          chmod 700 "$RUNNER_TEMP/bb-askpass.sh"
+          echo "GIT_CONFIG_COUNT=1" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_KEY_0=http.extraHeader" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_VALUE_0=Authorization: Bearer $BB_TOKEN" >> "$GITHUB_ENV"
 
-          echo "GIT_ASKPASS=$RUNNER_TEMP/bb-askpass.sh" >> "$GITHUB_ENV"
-          echo "GIT_TERMINAL_PROMPT=0" >> "$GITHUB_ENV"
+          echo "Bitbucket Bearer authentication configured."
 
-          echo "Bitbucket authentication configured."
+      - name: Test Bitbucket Authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Testing Bitbucket project token..."
+
+          git ls-remote "$BITBUCKET_CLONE_URL" HEAD
+
+          echo "Bitbucket authentication successful."
+
+      - name: Clone Bitbucket Repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Cloning Bitbucket repository..."
+
+          git init bitbucket-repo
+          cd bitbucket-repo
+
+          git remote add origin "$BITBUCKET_CLONE_URL"
+
+          git fetch --no-tags origin "$BASE_SHA"
+          git fetch --no-tags origin "$HEAD_SHA"
+
+          git checkout -b base FETCH_HEAD
+          git checkout -b head "$HEAD_SHA"
+
+          echo "Repository clone and fetch completed."
 
       # --------------------------------------------------
       # STEP 3: Construct Bitbucket clone URL
